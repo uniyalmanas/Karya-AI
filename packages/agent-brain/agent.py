@@ -6,6 +6,8 @@ import re
 import base64
 import traceback
 import httpx
+from html import unescape
+from urllib.parse import quote_plus
 from dotenv import load_dotenv
 from google.api_core.exceptions import ResourceExhausted
 from playwright.async_api import async_playwright
@@ -101,6 +103,228 @@ def parse_weather_location(goal: str):
 
     tokens = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', goal)
     return tokens[-1] if tokens else None
+
+
+INDIAN_STATES = [
+    "Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chhattisgarh",
+    "Goa", "Gujarat", "Haryana", "Himachal Pradesh", "Jharkhand", "Karnataka",
+    "Kerala", "Madhya Pradesh", "Maharashtra", "Manipur", "Meghalaya",
+    "Mizoram", "Nagaland", "Odisha", "Punjab", "Rajasthan", "Sikkim",
+    "Tamil Nadu", "Telangana", "Tripura", "Uttar Pradesh", "Uttarakhand",
+    "West Bengal", "Delhi", "Jammu and Kashmir", "Ladakh", "Puducherry",
+    "Chandigarh", "Andaman and Nicobar", "Dadra and Nagar Haveli", "Daman and Diu",
+    "Lakshadweep"
+]
+
+
+def write_mission_result(mission_id: str, data: dict):
+    result_path = os.path.join(os.path.dirname(__file__), f"mission_{mission_id}.json")
+    with open(result_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+    print(f"[Result] Saved mission output to {result_path}")
+
+
+def classify_india_workflow(goal: str) -> str | None:
+    normalized_goal = goal.lower()
+
+    if any(term in normalized_goal for term in ["gem", "tender", "bid", "procurement", "eprocure"]):
+        return "gem_tender_discovery"
+
+    if any(term in normalized_goal for term in ["gst", "gstr", "eway", "e-way", "invoice mismatch"]):
+        return "gst_assistant"
+
+    if any(term in normalized_goal for term in ["udyam", "msme certificate", "msme registration"]):
+        return "udyam_assistant"
+
+    return None
+
+
+def parse_budget_limit(goal: str) -> int | None:
+    normalized = goal.lower().replace(",", "")
+    match = re.search(r'(?:under|below|less than|upto|up to|max(?:imum)?)\s*(?:inr|rs\.?|rupees)?\s*([0-9]+(?:\.[0-9]+)?)\s*(lakh|lakhs|lac|lacs|crore|cr|k)?', normalized)
+    if not match:
+        return None
+
+    amount = float(match.group(1))
+    unit = match.group(2) or ""
+
+    if unit in ["lakh", "lakhs", "lac", "lacs"]:
+        amount *= 100000
+    elif unit in ["crore", "cr"]:
+        amount *= 10000000
+    elif unit == "k":
+        amount *= 1000
+
+    return int(amount)
+
+
+def parse_tender_filters(goal: str) -> dict:
+    state = None
+    for candidate in INDIAN_STATES:
+        if re.search(rf'\b{re.escape(candidate)}\b', goal, flags=re.IGNORECASE):
+            state = candidate
+            break
+
+    category = goal
+    cleanup_patterns = [
+        r'\b(find|search|show|track|monitor|get|daily)\b',
+        r'\b(gem|government|govt|tender|tenders|bid|bids|procurement|opportunities)\b',
+        r'\b(in|for|under|below|less than|upto|up to|max|maximum)\b',
+        r'\b(INR|rs\.?|rupees)\b',
+        r'[0-9,.]+\s*(lakh|lakhs|lac|lacs|crore|cr|k)?',
+    ]
+
+    for pattern in cleanup_patterns:
+        category = re.sub(pattern, " ", category, flags=re.IGNORECASE)
+
+    if state:
+        category = re.sub(re.escape(state), " ", category, flags=re.IGNORECASE)
+
+    category = " ".join(category.split()).strip(" -,:")
+    if not category:
+        category = "relevant business supplies"
+
+    return {
+        "category": category,
+        "state": state,
+        "max_value_inr": parse_budget_limit(goal),
+    }
+
+
+def strip_html(value: str) -> str:
+    return " ".join(unescape(re.sub(r'<[^>]+>', ' ', value)).split())
+
+
+async def run_public_tender_search(goal: str, mission_id: str):
+    filters = parse_tender_filters(goal)
+    query_parts = ["GeM tender", filters["category"]]
+
+    if filters["state"]:
+        query_parts.append(filters["state"])
+    if filters["max_value_inr"]:
+        query_parts.append(f"under INR {filters['max_value_inr']}")
+
+    query_parts.append("site:gem.gov.in OR site:bidplus.gem.gov.in")
+    search_query = " ".join(query_parts)
+    search_url = f"https://www.bing.com/search?q={quote_plus(search_query)}"
+
+    print("[Planner] Selected workflow: gem_tender_discovery")
+    print(f"[Tender] Category: {filters['category']}")
+    print(f"[Tender] State: {filters['state'] or 'All India'}")
+    if filters["max_value_inr"]:
+        print(f"[Tender] Budget ceiling: INR {filters['max_value_inr']}")
+    print("[Tender] Searching public tender indexes.")
+
+    opportunities = []
+
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            response = await client.get(search_url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            })
+            response.raise_for_status()
+            html_text = response.text
+
+        blocks = re.findall(r'<li class="b_algo".*?</li>', html_text, flags=re.IGNORECASE | re.DOTALL)
+        for block in blocks[:8]:
+            title_match = re.search(r'<h2.*?<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', block, flags=re.IGNORECASE | re.DOTALL)
+            snippet_match = re.search(r'<p[^>]*>(.*?)</p>', block, flags=re.IGNORECASE | re.DOTALL)
+            if not title_match:
+                continue
+
+            title = strip_html(title_match.group(2))
+            link = unescape(title_match.group(1))
+            snippet = strip_html(snippet_match.group(1)) if snippet_match else ""
+
+            opportunities.append({
+                "title": title,
+                "link": link,
+                "snippet": snippet,
+                "source": "public_search"
+            })
+    except Exception as exc:
+        print(f"[Tender] Public search failed: {exc}")
+
+    result = {
+        "workflow": "gem_tender_discovery",
+        "status": "completed",
+        "filters": filters,
+        "search_query": search_query,
+        "search_url": search_url,
+        "opportunities": opportunities,
+        "next_actions": [
+            "Verify each opportunity on the official GeM portal before bidding.",
+            "Shortlist tenders by eligibility, EMD, delivery location, and closing date.",
+            "Prepare documents: GST certificate, PAN, Udyam/MSME certificate if available, product catalogue, authorization letter, financial statements, and past performance documents.",
+            "Ask for human approval before bid submission, pricing, payment, or DSC signing."
+        ],
+        "human_approval_required_for": [
+            "Portal login",
+            "OTP or CAPTCHA",
+            "Final bid submission",
+            "Price quote confirmation",
+            "Digital signature or payment"
+        ]
+    }
+
+    if not opportunities:
+        result["note"] = "No public search results were extracted. The workflow still produced filters, search URL, and bidding checklist so an operator can continue from the official portal."
+
+    write_mission_result(mission_id, result)
+
+
+async def run_gst_assistant(goal: str, mission_id: str):
+    print("[Planner] Selected workflow: gst_assistant")
+    result = {
+        "workflow": "gst_assistant",
+        "status": "needs_human_login",
+        "summary": "Karya can prepare GST portal work, but login, OTP, CAPTCHA, and final filing need human approval.",
+        "supported_next_steps": [
+            "Check GST filing status",
+            "Download GSTR-1, GSTR-3B, or GSTR-2B",
+            "Create due-date reminders",
+            "Prepare an invoice mismatch checklist"
+        ],
+        "required_from_user": [
+            "GSTIN",
+            "GST portal username",
+            "Human-provided OTP/CAPTCHA during login",
+            "Return period or financial year"
+        ],
+        "human_approval_required_for": [
+            "Login OTP/CAPTCHA",
+            "Any filing submission",
+            "Any payment or ledger offset"
+        ],
+        "original_goal": goal
+    }
+    write_mission_result(mission_id, result)
+
+
+async def run_udyam_assistant(goal: str, mission_id: str):
+    print("[Planner] Selected workflow: udyam_assistant")
+    result = {
+        "workflow": "udyam_assistant",
+        "status": "needs_human_details",
+        "summary": "Karya can organize MSME/Udyam certificate retrieval or update workflows after the user provides business identifiers.",
+        "required_from_user": [
+            "Udyam registration number if available",
+            "Mobile/email access for OTP",
+            "PAN/Aadhaar-linked owner approval where required"
+        ],
+        "safe_actions": [
+            "Prepare document checklist",
+            "Navigate to official Udyam portal",
+            "Extract certificate status after human-approved login"
+        ],
+        "human_approval_required_for": [
+            "OTP",
+            "Aadhaar/PAN-linked verification",
+            "Any final update or submission"
+        ],
+        "original_goal": goal
+    }
+    write_mission_result(mission_id, result)
 
 # Interactive overlay markup injection logic
 MARK_ELEMENTS_JS = """
@@ -299,6 +523,19 @@ async def get_brain_decision(img_path, goal):
     return None
 
 async def run_karya_agent(goal: str, mission_id: str = "fallback_id"):
+    workflow = classify_india_workflow(goal)
+    if workflow == "gem_tender_discovery":
+        await run_public_tender_search(goal, mission_id)
+        return
+
+    if workflow == "gst_assistant":
+        await run_gst_assistant(goal, mission_id)
+        return
+
+    if workflow == "udyam_assistant":
+        await run_udyam_assistant(goal, mission_id)
+        return
+
     weather_location = parse_weather_location(goal)
     if weather_location:
         print(f"🌤️ Detected weather request for '{weather_location}'. Using direct weather fallback.")

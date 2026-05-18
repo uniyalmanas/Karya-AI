@@ -127,13 +127,13 @@ export default function MissionControl() {
                     <h2 style={{ margin: 0, fontSize: '28px', fontWeight: '700', letterSpacing: 0 }}>KaryaAI Core Operator</h2>
                     <span style={{ fontSize: '12px', color: '#94a3b8', backgroundColor: '#1e293b', padding: '4px 12px', borderRadius: '20px', border: '1px solid #334155' }}>v1.1.0-Stream</span>
                 </div>
-                <p style={{ color: '#94a3b8', margin: '0 0 32px 0', fontSize: '15px' }}>Orchestrate multi-step web interaction frameworks using adaptive computer-vision models.</p>
+                <p style={{ color: '#94a3b8', margin: '0 0 32px 0', fontSize: '15px' }}>Run Indian SME workflows across GeM, GST, Udyam, documents, and public business portals with live audit logs.</p>
 
                 {/* Form Inputs */}
                 <form onSubmit={handleLaunch} style={{ display: 'flex', gap: '12px', marginBottom: '32px' }}>
                     <input
                         type="text"
-                        placeholder="Define operational goal directive (e.g., Pull current top technical trends from HackerNews)"
+                        placeholder="Try: Find GeM tenders for office chairs in Uttarakhand under 5 lakh"
                         value={goal}
                         onChange={(e) => setGoal(e.target.value)}
                         disabled={loading}
@@ -144,7 +144,7 @@ export default function MissionControl() {
                         disabled={loading}
                         style={{ padding: '0 28px', borderRadius: '10px', backgroundColor: loading ? '#0ea5e9' : '#0284c7', color: '#fff', border: 'none', cursor: loading ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '15px', transition: 'background-color 0.2s' }}
                     >
-                        {loading ? 'Executing Engine...' : 'Launch Agent'}
+                        {loading ? 'Running Workflow...' : 'Launch Karya'}
                     </button>
                 </form>
 
@@ -173,7 +173,7 @@ export default function MissionControl() {
                 {/* Display Final Answer for Viewers */}
                 {activeMission && activeMission.status === 'completed' && (
                     <div style={{ marginTop: '32px', padding: '24px', borderRadius: '12px', border: '1px solid #22c55e', backgroundColor: '#031b13', color: '#d9f99d' }}>
-                        <h4 style={{ margin: '0 0 12px 0', fontSize: '18px', color: '#86efac' }}>Viewer Answer</h4>
+                        <h4 style={{ margin: '0 0 12px 0', fontSize: '18px', color: '#86efac' }}>Mission Output</h4>
                         <div style={{ fontSize: '16px', lineHeight: '1.8', whiteSpace: 'pre-wrap' }}>
                             {getActiveAnswer()}
                         </div>
@@ -192,7 +192,7 @@ export default function MissionControl() {
                 {/* Display Final JSON Result Payload when Completed */}
                 {activeMission && activeMission.status === 'completed' && activeMission.data && (
                     <div style={{ marginTop: '24px', padding: '24px', borderRadius: '12px', border: '1px solid #1e293b', backgroundColor: '#1e293b' }}>
-                        <h4 style={{ margin: '0 0 12px 0', fontSize: '16px', color: '#38bdf8' }}>Extracted Workspace Data Footprint</h4>
+                        <h4 style={{ margin: '0 0 12px 0', fontSize: '16px', color: '#38bdf8' }}>Structured Mission Data</h4>
                         <pre style={{ backgroundColor: '#0f172a', color: '#38bdf8', padding: '16px', borderRadius: '8px', margin: 0, fontSize: '14px', overflowX: 'auto', border: '1px solid #334155' }}>
                             {JSON.stringify(activeMission.data, null, 2)}
                         </pre>
