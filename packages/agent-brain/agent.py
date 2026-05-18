@@ -197,6 +197,8 @@ def strip_html(value: str) -> str:
 
 def normalize_search_link(link: str) -> str:
     link = unescape(link)
+    if link.startswith("//"):
+        link = f"https:{link}"
     if link.startswith("/url?"):
         parsed = urlparse(link)
         query = parse_qs(parsed.query)
@@ -214,10 +216,48 @@ def normalize_search_link(link: str) -> str:
     return link
 
 
+def is_real_tender_link(link: str) -> bool:
+    if not link.startswith("http"):
+        return False
+
+    parsed = urlparse(link)
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    query = parsed.query.lower()
+
+    if host.endswith("bing.com") or host.endswith("duckduckgo.com"):
+        return False
+
+    allowed_hosts = (
+        "gem.gov.in",
+        "bidplus.gem.gov.in",
+        "eprocure.gov.in",
+        "etenders.gov.in",
+    )
+    if not any(host == allowed or host.endswith(f".{allowed}") for allowed in allowed_hosts):
+        return False
+
+    tender_markers = ("bid", "tender", "bids", "showbid", "show-tender")
+    return any(marker in path or marker in query for marker in tender_markers)
+
+
+def looks_like_tender_title(title: str) -> bool:
+    normalized = title.lower()
+    blocked_titles = {
+        "hindi", "english", "বাংলা", "اردو", "ਪੰਜਾਬੀ", "मराठी", "తెలుగు", "தமிழ்", "ಕನ್ನಡ"
+    }
+    if normalized in blocked_titles:
+        return False
+    return any(term in normalized for term in ["bid", "tender", "gem", "procurement"])
+
+
 def add_unique_opportunity(opportunities: list[dict], candidate: dict):
     link = candidate.get("link", "")
     title = candidate.get("title", "")
     if not title or not link:
+        return
+
+    if not is_real_tender_link(link) or not looks_like_tender_title(title):
         return
 
     existing_links = {item.get("link") for item in opportunities}
@@ -250,8 +290,6 @@ def parse_bing_results(html_text: str) -> list[dict]:
     for link, title in re.findall(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html_text, flags=re.IGNORECASE | re.DOTALL):
         clean_title = strip_html(title)
         clean_link = normalize_search_link(link)
-        if "gem.gov.in" not in clean_link and "bidplus.gem.gov.in" not in clean_link:
-            continue
         add_unique_opportunity(opportunities, {
             "title": clean_title,
             "link": clean_link,
@@ -270,8 +308,6 @@ def parse_duckduckgo_results(html_text: str) -> list[dict]:
 
     for link, title in result_blocks[:10]:
         clean_link = normalize_search_link(link)
-        if clean_link.startswith("//"):
-            clean_link = f"https:{clean_link}"
 
         add_unique_opportunity(opportunities, {
             "title": strip_html(title),
@@ -307,12 +343,15 @@ async def fetch_public_tender_opportunities(search_query: str) -> tuple[list[dic
                 })
                 response.raise_for_status()
                 parsed = source["parser"](response.text)
+                before_count = len(opportunities)
                 for item in parsed:
                     add_unique_opportunity(opportunities, item)
+                accepted_count = len(opportunities) - before_count
                 diagnostics.append({
                     "source": source["name"],
                     "status": response.status_code,
-                    "results_extracted": len(parsed),
+                    "candidates_found": len(parsed),
+                    "accepted_opportunities": accepted_count,
                 })
             except Exception as exc:
                 diagnostics.append({
