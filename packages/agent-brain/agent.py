@@ -7,7 +7,7 @@ import base64
 import traceback
 import httpx
 from html import unescape
-from urllib.parse import quote_plus
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 from dotenv import load_dotenv
 from google.api_core.exceptions import ResourceExhausted
 from playwright.async_api import async_playwright
@@ -195,6 +195,138 @@ def strip_html(value: str) -> str:
     return " ".join(unescape(re.sub(r'<[^>]+>', ' ', value)).split())
 
 
+def normalize_search_link(link: str) -> str:
+    link = unescape(link)
+    if link.startswith("/url?"):
+        parsed = urlparse(link)
+        query = parse_qs(parsed.query)
+        if query.get("q"):
+            return query["q"][0]
+    if "bing.com/ck/a" in link and "u=" in link:
+        query = parse_qs(urlparse(link).query)
+        encoded = query.get("u", [""])[0]
+        if encoded.startswith("a1"):
+            encoded = encoded[2:]
+        try:
+            return unquote(encoded)
+        except Exception:
+            return link
+    return link
+
+
+def add_unique_opportunity(opportunities: list[dict], candidate: dict):
+    link = candidate.get("link", "")
+    title = candidate.get("title", "")
+    if not title or not link:
+        return
+
+    existing_links = {item.get("link") for item in opportunities}
+    if link in existing_links:
+        return
+
+    opportunities.append(candidate)
+
+
+def parse_bing_results(html_text: str) -> list[dict]:
+    opportunities = []
+    blocks = re.findall(r'<li class="b_algo".*?</li>', html_text, flags=re.IGNORECASE | re.DOTALL)
+
+    for block in blocks[:10]:
+        title_match = re.search(r'<h2.*?<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', block, flags=re.IGNORECASE | re.DOTALL)
+        snippet_match = re.search(r'<p[^>]*>(.*?)</p>', block, flags=re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            continue
+
+        add_unique_opportunity(opportunities, {
+            "title": strip_html(title_match.group(2)),
+            "link": normalize_search_link(title_match.group(1)),
+            "snippet": strip_html(snippet_match.group(1)) if snippet_match else "",
+            "source": "bing_public_search"
+        })
+
+    if opportunities:
+        return opportunities
+
+    for link, title in re.findall(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html_text, flags=re.IGNORECASE | re.DOTALL):
+        clean_title = strip_html(title)
+        clean_link = normalize_search_link(link)
+        if "gem.gov.in" not in clean_link and "bidplus.gem.gov.in" not in clean_link:
+            continue
+        add_unique_opportunity(opportunities, {
+            "title": clean_title,
+            "link": clean_link,
+            "snippet": "",
+            "source": "bing_public_search"
+        })
+        if len(opportunities) >= 8:
+            break
+
+    return opportunities
+
+
+def parse_duckduckgo_results(html_text: str) -> list[dict]:
+    opportunities = []
+    result_blocks = re.findall(r'<a rel="nofollow" class="result__a" href="([^"]+)">(.*?)</a>', html_text, flags=re.IGNORECASE | re.DOTALL)
+
+    for link, title in result_blocks[:10]:
+        clean_link = normalize_search_link(link)
+        if clean_link.startswith("//"):
+            clean_link = f"https:{clean_link}"
+
+        add_unique_opportunity(opportunities, {
+            "title": strip_html(title),
+            "link": clean_link,
+            "snippet": "",
+            "source": "duckduckgo_public_search"
+        })
+
+    return opportunities
+
+
+async def fetch_public_tender_opportunities(search_query: str) -> tuple[list[dict], list[dict]]:
+    search_sources = [
+        {
+            "name": "bing",
+            "url": f"https://www.bing.com/search?q={quote_plus(search_query)}",
+            "parser": parse_bing_results,
+        },
+        {
+            "name": "duckduckgo",
+            "url": f"https://duckduckgo.com/html/?q={quote_plus(search_query)}",
+            "parser": parse_duckduckgo_results,
+        },
+    ]
+    opportunities = []
+    diagnostics = []
+
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        for source in search_sources:
+            try:
+                response = await client.get(source["url"], headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                })
+                response.raise_for_status()
+                parsed = source["parser"](response.text)
+                for item in parsed:
+                    add_unique_opportunity(opportunities, item)
+                diagnostics.append({
+                    "source": source["name"],
+                    "status": response.status_code,
+                    "results_extracted": len(parsed),
+                })
+            except Exception as exc:
+                diagnostics.append({
+                    "source": source["name"],
+                    "status": "failed",
+                    "error": str(exc),
+                })
+
+            if len(opportunities) >= 8:
+                break
+
+    return opportunities[:8], diagnostics
+
+
 async def run_public_tender_search(goal: str, mission_id: str):
     filters = parse_tender_filters(goal)
     query_parts = ["GeM tender", filters["category"]]
@@ -207,6 +339,7 @@ async def run_public_tender_search(goal: str, mission_id: str):
     query_parts.append("site:gem.gov.in OR site:bidplus.gem.gov.in")
     search_query = " ".join(query_parts)
     search_url = f"https://www.bing.com/search?q={quote_plus(search_query)}"
+    official_gem_url = "https://bidplus.gem.gov.in/all-bids"
 
     print("[Planner] Selected workflow: gem_tender_discovery")
     print(f"[Tender] Category: {filters['category']}")
@@ -215,35 +348,7 @@ async def run_public_tender_search(goal: str, mission_id: str):
         print(f"[Tender] Budget ceiling: INR {filters['max_value_inr']}")
     print("[Tender] Searching public tender indexes.")
 
-    opportunities = []
-
-    try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            response = await client.get(search_url, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            })
-            response.raise_for_status()
-            html_text = response.text
-
-        blocks = re.findall(r'<li class="b_algo".*?</li>', html_text, flags=re.IGNORECASE | re.DOTALL)
-        for block in blocks[:8]:
-            title_match = re.search(r'<h2.*?<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', block, flags=re.IGNORECASE | re.DOTALL)
-            snippet_match = re.search(r'<p[^>]*>(.*?)</p>', block, flags=re.IGNORECASE | re.DOTALL)
-            if not title_match:
-                continue
-
-            title = strip_html(title_match.group(2))
-            link = unescape(title_match.group(1))
-            snippet = strip_html(snippet_match.group(1)) if snippet_match else ""
-
-            opportunities.append({
-                "title": title,
-                "link": link,
-                "snippet": snippet,
-                "source": "public_search"
-            })
-    except Exception as exc:
-        print(f"[Tender] Public search failed: {exc}")
+    opportunities, diagnostics = await fetch_public_tender_opportunities(search_query)
 
     result = {
         "workflow": "gem_tender_discovery",
@@ -251,9 +356,12 @@ async def run_public_tender_search(goal: str, mission_id: str):
         "filters": filters,
         "search_query": search_query,
         "search_url": search_url,
+        "official_gem_bids_url": official_gem_url,
         "opportunities": opportunities,
+        "search_diagnostics": diagnostics,
         "next_actions": [
             "Verify each opportunity on the official GeM portal before bidding.",
+            "Open the official GeM bids page and apply the parsed category, state, and budget filters.",
             "Shortlist tenders by eligibility, EMD, delivery location, and closing date.",
             "Prepare documents: GST certificate, PAN, Udyam/MSME certificate if available, product catalogue, authorization letter, financial statements, and past performance documents.",
             "Ask for human approval before bid submission, pricing, payment, or DSC signing."
@@ -268,7 +376,11 @@ async def run_public_tender_search(goal: str, mission_id: str):
     }
 
     if not opportunities:
+        result["status"] = "needs_operator_review"
+        result["confidence"] = "low"
         result["note"] = "No public search results were extracted. The workflow still produced filters, search URL, and bidding checklist so an operator can continue from the official portal."
+    else:
+        result["confidence"] = "medium"
 
     write_mission_result(mission_id, result)
 

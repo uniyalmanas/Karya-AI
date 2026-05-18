@@ -69,6 +69,22 @@ export default function MissionControl() {
         if (typeof activeMission.data === 'string') return activeMission.data;
         if (activeMission.data.weather) return activeMission.data.weather;
         if (activeMission.data.message) return activeMission.data.message;
+        if (activeMission.data.workflow === 'gem_tender_discovery') {
+            const count = activeMission.data.opportunities?.length || 0;
+            const filters = activeMission.data.filters || {};
+            const status = activeMission.data.status === 'needs_operator_review' ? 'Needs operator review' : 'Completed';
+            return [
+                `${status}: ${count} public tender opportunities extracted.`,
+                `Category: ${filters.category || 'Not specified'}`,
+                `State: ${filters.state || 'All India'}`,
+                filters.max_value_inr ? `Budget ceiling: INR ${filters.max_value_inr}` : null,
+                activeMission.data.official_gem_bids_url ? `Official GeM bids page: ${activeMission.data.official_gem_bids_url}` : null,
+                activeMission.data.note || null
+            ].filter(Boolean).join('\n');
+        }
+        if (activeMission.data.workflow === 'gst_assistant' || activeMission.data.workflow === 'udyam_assistant') {
+            return activeMission.data.summary || JSON.stringify(activeMission.data, null, 2);
+        }
         return JSON.stringify(activeMission.data, null, 2);
     };
 
