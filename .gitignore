@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Python environments and cache
+venv/
+.venv/
+packages/agent-brain/venv/
+packages/agent-brain/venv311/
+__pycache__/
+*.py[cod]
+
+# Environment secrets
+.env
+*.env
+apps/server/.env
+packages/agent-brain/.env
+
+# Build output
+dist/
+build/
+apps/web/dist/
+
+# Runtime mission artifacts
+packages/agent-brain/mission_*.json
+packages/agent-brain/mission_result.json
+packages/agent-brain/step_*.png
+packages/agent-brain/brain_vision.png
+apps/server/step_*.png
+
+# Logs and local OS/editor files
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,23 @@
+{
+  "name": "karya-ai-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev --workspace=apps/server",
+    "dev:web": "npm run dev --workspace=apps/web",
+    "dev:brain": "cd packages/agent-brain && .\\venv311\\Scripts\\python.exe -m uvicorn server:app --reload --host 127.0.0.1 --port 8000",
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:web\" \"npm run dev:brain\"",
+    "install:all": "npm install && cd packages/agent-brain && .\\venv311\\Scripts\\python.exe -m pip install -r requirements.txt"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "nodemon": "^3.1.0"
+  },
+  "dependencies": {
+    "axios": "^1.16.1"
+  }
+}
